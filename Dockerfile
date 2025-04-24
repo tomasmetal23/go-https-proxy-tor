@@ -20,9 +20,9 @@ FROM alpine:3.19
 
 # Instalar SOLO lo necesario para RUNTIME
 RUN apk add --no-cache \
-    ca-certificates \  # Para verificar certificados TLS remotos
-    libssl3 \         # Soporte criptográfico para crypto/tls
-    tzdata            # Zonas horarias (opcional, útil para logs)
+    ca-certificates \
+    libssl3 \         
+    tzdata            
 
 WORKDIR /app
 COPY --from=builder /app/gotls-tor-bridge .
