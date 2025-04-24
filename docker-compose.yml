@@ -1,0 +1,37 @@
+version: '3.8'
+services:
+  go-tor-bridge:
+    build: .
+    ports:
+      - "443"
+    labels:
+      - traefik.enable=true
+      - traefik.tcp.routers.gtb.entrypoints=websecure
+      - traefik.tcp.routers.gtb.rule=HostSNI(`tor.saiyans.com.ve`)
+      - traefik.tcp.routers.gtb.tls=true
+      - traefik.tcp.routers.gtb.tls.passthrough=true
+      - traefik.tcp.routers.gtb.tls.certresolver=lets-encr
+      - traefik.tcp.services.gtb.loadbalancer.server.port=443
+    volumes:
+      - /home/saiyans/stacks/traefik_podman/output/*.saiyans.com.ve/cert.pem:/app/server.crt:ro
+      - /home/saiyans/stacks/traefik_podman/output/*.saiyans.com.ve/key.pem:/app/server.key:ro
+    environment:
+      - LISTEN_PORT=443
+      - TOR_SOCKS_HOST=tor
+      - TOR_SOCKS_PORT=9050
+      - CADDY_HOST=caddy
+      - CADDY_PORT=80
+      - TLS_CERT_FILE=/app/server.crt
+      - TLS_KEY_FILE=/app/server.key
+    networks:
+      - app-network
+
+  caddy:
+    image: caddy:2.6-alpine
+    command: caddy file-server --root /srv --listen :80
+    networks:
+      - app-network
+    volumes:
+      - ./index.html:/srv/index.html:ro
+networks:
+  app-network:
