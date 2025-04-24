@@ -7,8 +7,12 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  build_and_push: # Renombro el job para que sea más descriptivo
+    name: Build, Login and Push Docker Image
     runs-on: ubuntu-latest
+    permissions: # Agrega la sección de permisos
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -16,21 +20,26 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24.2'
-          cache: true  # Habilita caching de dependencias (más rápido)
+          cache: true
 
       - name: Build Go binary
         run: go build -o gotls-tor-bridge .
 
       - name: Login to GitHub Container Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+        uses: docker/login-action@v3 # Utiliza la acción dedicada para el login
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push Docker Image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          docker buildx build \
-            --platform linux/amd64 \
-            -t ghcr.io/${{ github.repository }}:latest \
-            -t ghcr.io/${{ github.repository }}:${{ github.sha }} \
-            --push .
+        uses: docker/build-push-action@v5 # Utiliza la acción dedicada para construir y hacer push
+        with:
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          context: .
