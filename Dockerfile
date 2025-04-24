@@ -55,9 +55,7 @@
     # Crear un usuario y grupo específicos
     RUN addgroup -S appgroup && adduser -S appuser -G appgroup
     # Cambiar propietario de los archivos necesarios
-    RUN chown appuser:appgroup /app/https-tor-proxy \
-        && chown appuser:appgroup /app/server.crt \
-        && chown appuser:appgroup /app/server.key
+
     # Cambiar al usuario no privilegiado
     USER appuser
     
