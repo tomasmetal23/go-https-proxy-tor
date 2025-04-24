@@ -1,5 +1,5 @@
 # Etapa de construcción
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24.2-alpine AS builder
 
 # Instalar dependencias de COMPILACIÓN (solo necesarias para builder)
 RUN apk add --no-cache \
