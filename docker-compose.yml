@@ -1,7 +1,8 @@
 version: '3.8'
 services:
   go-tor-bridge:
-    build: .
+    #build: .
+    image: ghcr.io/tomasmetal23/gotls-tor-bridge:latest
     ports:
       - "443"
     labels:
@@ -17,7 +18,7 @@ services:
       - /home/saiyans/stacks/traefik_podman/output/*.saiyans.com.ve/key.pem:/app/server.key:ro
     environment:
       - LISTEN_PORT=443
-      - TOR_SOCKS_HOST=tor
+      - TOR_SOCKS_HOST=host.containers.internal
       - TOR_SOCKS_PORT=9050
       - CADDY_HOST=caddy
       - CADDY_PORT=80
