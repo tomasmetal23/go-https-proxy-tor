@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -205,5 +205,5 @@ func handleTorProxy(clientConn net.Conn, initialRequest []byte) {
 }
 
 func copyData(dst net.Conn, src net.Conn) (int64, error) {
-	return net.Copy(dst, src)
+	return io.Copy(dst, src)
 }
