@@ -14,11 +14,11 @@ import (
 )
 
 var (
-	listenPort    string
-	torSOCKSAddr  string
-	caddyAddr     string
-	tlsCertFile   string
-	tlsKeyFile    string
+	listenPort   string
+	torSOCKSAddr string
+	caddyAddr    string
+	tlsCertFile  string
+	tlsKeyFile   string
 )
 
 func init() {
@@ -94,7 +94,7 @@ func handleConnection(clientConn net.Conn) {
 	} else if strings.HasPrefix(request, "CONNECT") {
 		// Parece una solicitud CONNECT para tunelización, manejar como proxy a Tor
 		fmt.Println("Detectada solicitud CONNECT, manejando proxy a Tor...")
-		handleTorProxy(clientConn, buffer[:n]) // Pasar el buffer inicial
+		handleTorProxyTunnel(clientConn, buffer[:n]) // Usar la nueva función
 		return
 	} else {
 		fmt.Println("Solicitud no reconocida, cerrando conexión.")
@@ -102,29 +102,13 @@ func handleConnection(clientConn net.Conn) {
 	}
 }
 
-// Función para reenviar la conexión/solicitud a Caddy
-func forwardToCaddy(clientConn net.Conn, request string) {
-	caddyConn, err := net.Dial("tcp", caddyAddr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al conectar a Caddy (%s): %v\n", caddyAddr, err)
-		return
-	}
-	defer caddyConn.Close()
-
-	_, err = caddyConn.Write([]byte(request))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud a Caddy: %v\n", err)
-		return
-	}
-
-	copyData(clientConn, caddyConn)
-}
-
-// Función para manejar el proxy a Tor para solicitudes CONNECT
-func handleTorProxy(clientConn net.Conn, initialRequest []byte) {
+// Nueva función para manejar el túnel TCP para CONNECT
+func handleTorProxyTunnel(clientConn net.Conn, initialRequest []byte) {
 	torConn, err := net.Dial("tcp", torSOCKSAddr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error al conectar al proxy SOCKS5 (%s): %v\n", torSOCKSAddr, err)
+		// Informar al cliente del error (opcional)
+		clientConn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\n\r\n"))
 		return
 	}
 	defer torConn.Close()
@@ -134,24 +118,27 @@ func handleTorProxy(clientConn net.Conn, initialRequest []byte) {
 	req, err := http.ReadRequest(bufioReader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error al leer la solicitud CONNECT: %v\n", err)
+		// Informar al cliente del error (opcional)
+		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
 
 	if req.URL == nil {
 		fmt.Fprintf(os.Stderr, "URL nulo en la solicitud CONNECT\n")
+		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
 
 	target := req.URL.Host
 	if !strings.Contains(target, ":") {
-		target += ":443" // Puerto por defecto para HTTPS
+		target += ":443"
 	}
-	fmt.Printf("Destino de la conexión CONNECT: %s\n", target)
+	fmt.Printf("Destino del túnel CONNECT: %s\n", target)
 
 	// Implementación del protocolo SOCKS5
 
 	// Paso 1: Saludo SOCKS5
-	_, err = torConn.Write([]byte{0x05, 0x01, 0x00}) // Versión 5, 1 método, sin autenticación
+	_, err = torConn.Write([]byte{0x05, 0x01, 0x00})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error al enviar saludo SOCKS5: %v\n", err)
 		return
@@ -175,7 +162,7 @@ func handleTorProxy(clientConn net.Conn, initialRequest []byte) {
 		return
 	}
 
-	_, err = torConn.Write([]byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}) // VER, CMD=connect, RSV=0, ATYP=domain name
+	_, err = torConn.Write([]byte{0x05, 0x01, 0x00, 0x03, byte(len(host))})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud de conexión SOCKS5 (parte 1): %v\n", err)
 		return
@@ -185,14 +172,14 @@ func handleTorProxy(clientConn net.Conn, initialRequest []byte) {
 		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud de conexión SOCKS5 (host): %v\n", err)
 		return
 	}
-	_, err = torConn.Write([]byte{byte(port >> 8), byte(port & 0xff)}) // Puerto en big-endian
+	_, err = torConn.Write([]byte{byte(port >> 8), byte(port & 0xff)})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud de conexión SOCKS5 (puerto): %v\n", err)
 		return
 	}
 
 	// Paso 3: Leer la respuesta de la solicitud de conexión SOCKS5
-	connectResponse := make([]byte, 10) // Mínimo tamaño de respuesta
+	connectResponse := make([]byte, 10)
 	_, err = torConn.Read(connectResponse)
 	if err != nil || connectResponse[0] != 0x05 || connectResponse[1] != 0x00 {
 		fmt.Fprintf(os.Stderr, "Error en la respuesta de la solicitud de conexión SOCKS5: %v\n", err)
@@ -202,14 +189,31 @@ func handleTorProxy(clientConn net.Conn, initialRequest []byte) {
 	// Paso 4: Enviar respuesta de conexión establecida al cliente
 	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar la respuesta '200 Connection established' al cliente: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error al enviar la respuesta '200 Connection established': %v\n", err)
 		return
 	}
 	fmt.Printf("Enviada respuesta '200 Connection established' al cliente %s para %s\n", clientConn.RemoteAddr(), target)
 
-	// Paso 5: Reenviar datos bidireccionalmente
-	go copyData(clientConn, torConn)
-	go copyData(torConn, clientConn)
+	// Paso 5: Reenviar el tráfico bidireccionalmente hasta que una conexión cierre
+	copyData(clientConn, torConn)
+}
+
+// Función para reenviar la conexión/solicitud a Caddy
+func forwardToCaddy(clientConn net.Conn, request string) {
+	caddyConn, err := net.Dial("tcp", caddyAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error al conectar a Caddy (%s): %v\n", caddyAddr, err)
+		return
+	}
+	defer caddyConn.Close()
+
+	_, err = caddyConn.Write([]byte(request))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud a Caddy: %v\n", err)
+		return
+	}
+
+	copyData(clientConn, caddyConn)
 }
 
 func copyData(dst net.Conn, src net.Conn) (int64, error) {
