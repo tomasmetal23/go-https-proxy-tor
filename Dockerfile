@@ -8,7 +8,7 @@ RUN apk add --no-cache \
     openssl-dev  # Necesario si usas CGO con crypto/tls
 
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY go.mod ./
 RUN go mod download
 COPY . .
 
