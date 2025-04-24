@@ -2,31 +2,33 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
+	"net/textproto"
 	"os"
-	"strconv"
 	"strings"
+	"sync"
+
+	"golang.org/x/net/proxy"
 )
 
 var (
 	listenPort   string
 	torSOCKSAddr string
-	caddyAddr    string
 	tlsCertFile  string
 	tlsKeyFile   string
 )
 
 func init() {
-	listenPort = getEnv("LISTEN_PORT", "443")
+	listenPort = getEnv("LISTEN_PORT", "8443") // Usar un puerto > 1024 para pruebas sin root
 	torSOCKSAddr = net.JoinHostPort(getEnv("TOR_SOCKS_HOST", "127.0.0.1"), getEnv("TOR_SOCKS_PORT", "9050"))
-	caddyAddr = net.JoinHostPort(getEnv("CADDY_HOST", "caddy"), getEnv("CADDY_PORT", "80"))
-	tlsCertFile = getEnv("TLS_CERT_FILE", "/app/server.crt")
-	tlsKeyFile = getEnv("TLS_KEY_FILE", "/app/server.key")
+	tlsCertFile = getEnv("TLS_CERT_FILE", "./server.crt") // Rutas relativas para prueba fácil
+	tlsKeyFile = getEnv("TLS_KEY_FILE", "./server.key")   // Rutas relativas para prueba fácil
+
+	// Generar cert/key si no existen (solo para desarrollo fácil)
+	generateSelfSignedCert()
 }
 
 func getEnv(key string, defaultValue string) string {
@@ -37,185 +39,210 @@ func getEnv(key string, defaultValue string) string {
 	return value
 }
 
+// --- Funciones para generar Certificado Autofirmado (para desarrollo) ---
+func generateSelfSignedCert() {
+	// (Opcional pero útil) - Puedes añadir aquí el código para generar
+	// server.crt y server.key si no existen usando crypto/x509, etc.
+	// O simplemente generarlos manualmente con openssl:
+	// openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -sha256 -days 365 -nodes -subj "/CN=localhost"
+	if _, err := os.Stat(tlsCertFile); os.IsNotExist(err) {
+		fmt.Printf("Advertencia: Archivo de certificado '%s' no encontrado.\n", tlsCertFile)
+		fmt.Println("Puedes generar uno con: openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -sha256 -days 365 -nodes -subj \"/CN=localhost\"")
+	}
+	if _, err := os.Stat(tlsKeyFile); os.IsNotExist(err) {
+		fmt.Printf("Advertencia: Archivo de clave '%s' no encontrado.\n", tlsKeyFile)
+	}
+}
+
+// --- Fin de Funciones de Certificado ---
+
 func main() {
-	// Cargar el certificado y la clave
 	cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al cargar el certificado y la clave: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error al cargar certificado/clave TLS desde '%s' y '%s': %v\n", tlsCertFile, tlsKeyFile, err)
+		fmt.Fprintln(os.Stderr, "Asegúrate de que los archivos existen y son válidos.")
 		os.Exit(1)
 	}
 
-	// Configuración TLS
 	config := &tls.Config{
 		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12, // Buena práctica
 	}
 
-	// Crear el listener TLS
 	listener, err := tls.Listen("tcp", ":"+listenPort, config)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al escuchar en el puerto %s (TLS): %v\n", listenPort, err)
+		fmt.Fprintf(os.Stderr, "Error al escuchar en [::]:%s (TLS): %v\n", listenPort, err)
 		os.Exit(1)
 	}
 	defer listener.Close()
-	fmt.Printf("Escuchando en el puerto %s (TLS)...\n", listenPort)
+	fmt.Printf("Proxy HTTPS escuchando en [::]:%s (reenviando a SOCKS5 %s)\n", listenPort, torSOCKSAddr)
 
-	// Bucle para aceptar conexiones TLS y manejarlas
 	for {
-		conn, err := listener.Accept()
+		clientConn, err := listener.Accept()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error al aceptar la conexión TLS: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error al aceptar conexión TLS: %v\n", err)
 			continue
 		}
-		fmt.Printf("Nueva conexión TLS desde: %s\n", conn.RemoteAddr())
-		go handleConnection(conn)
+		// Manejar cada conexión en su propia goroutine
+		go handleConnection(clientConn)
 	}
 }
 
 func handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
+	fmt.Printf("Nueva conexión TLS desde: %s\n", clientConn.RemoteAddr())
 
-	// Leer los primeros bytes de la solicitud para determinar el método
-	buffer := make([]byte, 512)
-	n, err := clientConn.Read(buffer)
+	// Usar bufio.Reader para leer la solicitud línea por línea
+	reader := bufio.NewReader(clientConn)
+	tpReader := textproto.NewReader(reader) // Para leer cabeceras MIME
+
+	// Leer la línea de solicitud (ej: CONNECT example.com:443 HTTP/1.1)
+	requestLine, err := tpReader.ReadLine()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al leer la solicitud inicial del cliente: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[%s] Error al leer la línea de solicitud: %v\n", clientConn.RemoteAddr(), err)
 		return
 	}
 
-	request := string(buffer[:n])
-	fmt.Printf("Solicitud recibida desde %s:\n%s\n", clientConn.RemoteAddr(), request)
-
-	// Verificar el método HTTP
-	if strings.HasPrefix(request, "GET") || strings.HasPrefix(request, "POST") || strings.HasPrefix(request, "HEAD") {
-		// Parece una solicitud web normal, reenviar a Caddy
-		fmt.Println("Detectada solicitud web, reenviando a Caddy...")
-		forwardToCaddy(clientConn, request)
-		return
-	} else if strings.HasPrefix(request, "CONNECT") {
-		// Parece una solicitud CONNECT para tunelización, manejar como proxy a Tor
-		fmt.Println("Detectada solicitud CONNECT, manejando proxy a Tor...")
-		handleTorProxyTunnel(clientConn, buffer[:n]) // Usar la nueva función
-		return
-	} else {
-		fmt.Println("Solicitud no reconocida, cerrando conexión.")
+	// Parsear la línea de solicitud
+	method, requestURI, proto, ok := parseRequestLine(requestLine)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[%s] Línea de solicitud mal formada: %s\n", clientConn.RemoteAddr(), requestLine)
+		sendErrorResponse(clientConn, 400, "Bad Request") // 400 Bad Request
 		return
 	}
-}
 
-// Nueva función para manejar el túnel TCP para CONNECT
-func handleTorProxyTunnel(clientConn net.Conn, initialRequest []byte) {
-	torConn, err := net.Dial("tcp", torSOCKSAddr)
+	// Leer las cabeceras (y descartarlas por ahora, podrías usarlas para autenticación)
+	_, err = tpReader.ReadMIMEHeader()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al conectar al proxy SOCKS5 (%s): %v\n", torSOCKSAddr, err)
-		// Informar al cliente del error (opcional)
-		clientConn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\n\r\n"))
+		fmt.Fprintf(os.Stderr, "[%s] Error al leer cabeceras: %v\n", clientConn.RemoteAddr(), err)
+		sendErrorResponse(clientConn, 400, "Bad Request")
 		return
 	}
-	defer torConn.Close()
-	fmt.Printf("Conectado al proxy SOCKS5: %s para solicitud CONNECT desde %s\n", torSOCKSAddr, clientConn.RemoteAddr())
 
-	bufioReader := bufio.NewReader(bytes.NewReader(initialRequest))
-	req, err := http.ReadRequest(bufioReader)
+	fmt.Printf("[%s] Solicitud: %s %s %s\n", clientConn.RemoteAddr(), method, requestURI, proto)
+
+	// Este proxy SOLO maneja CONNECT para tunelizar
+	if method != "CONNECT" {
+		fmt.Fprintf(os.Stderr, "[%s] Método no soportado: %s\n", clientConn.RemoteAddr(), method)
+		sendErrorResponse(clientConn, 405, "Method Not Allowed") // 405 Method Not Allowed
+		return
+	}
+
+	// El requestURI para CONNECT es el host:port destino
+	targetAddr := requestURI
+	// Asegurarse de que el puerto esté presente (normalmente lo está para CONNECT)
+	if !strings.Contains(targetAddr, ":") {
+		fmt.Fprintf(os.Stderr, "[%s] Destino CONNECT sin puerto: %s\n", clientConn.RemoteAddr(), targetAddr)
+		sendErrorResponse(clientConn, 400, "Bad Request")
+		return
+	}
+
+	// --- Intentar conectar al destino via SOCKS5 (Tor) ---
+	fmt.Printf("[%s] Intentando conectar a '%s' via SOCKS5 (%s)\n", clientConn.RemoteAddr(), targetAddr, torSOCKSAddr)
+
+	// Usar golang.org/x/net/proxy para manejar SOCKS5 fácilmente
+	dialer, err := proxy.SOCKS5("tcp", torSOCKSAddr, nil, proxy.Direct) // proxy.Direct significa que el dialer SOCKS no usa otro proxy
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al leer la solicitud CONNECT: %v\n", err)
-		// Informar al cliente del error (opcional)
-		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
+		// Esto no debería fallar normalmente, es solo configuración
+		fmt.Fprintf(os.Stderr, "[%s] Error creando el dialer SOCKS5: %v\n", clientConn.RemoteAddr(), err)
+		sendErrorResponse(clientConn, 500, "Internal Server Error")
 		return
 	}
 
-	if req.URL == nil {
-		fmt.Fprintf(os.Stderr, "URL nulo en la solicitud CONNECT\n")
-		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
-		return
-	}
-
-	target := req.URL.Host
-	if !strings.Contains(target, ":") {
-		target += ":443"
-	}
-	fmt.Printf("Destino del túnel CONNECT: %s\n", target)
-
-	// Implementación del protocolo SOCKS5
-
-	// Paso 1: Saludo SOCKS5
-	_, err = torConn.Write([]byte{0x05, 0x01, 0x00})
+	// Intentar la conexión SOCKS5 al destino final
+	torConn, err := dialer.Dial("tcp", targetAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar saludo SOCKS5: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[%s] Error al conectar a '%s' via SOCKS5 (%s): %v\n", clientConn.RemoteAddr(), targetAddr, torSOCKSAddr, err)
+		// Traducir el error de SOCKS a un error HTTP adecuado
+		// (Esto es simplificado, los errores de SOCKS son más específicos)
+		sendErrorResponse(clientConn, 502, "Bad Gateway") // 502 Bad Gateway es común para errores de proxy
 		return
 	}
-	response := make([]byte, 2)
-	_, err = torConn.Read(response)
-	if err != nil || response[0] != 0x05 || response[1] != 0x00 {
-		fmt.Fprintf(os.Stderr, "Error en la respuesta del saludo SOCKS5: %v\n", err)
-		return
-	}
+	defer torConn.Close() // Asegurarse de cerrar la conexión a Tor
 
-	// Paso 2: Solicitud de conexión SOCKS5
-	host, portStr, err := net.SplitHostPort(target)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al parsear el destino: %v\n", err)
-		return
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al convertir el puerto a entero: %v\n", err)
-		return
-	}
+	fmt.Printf("[%s] Conexión SOCKS5 establecida a '%s'\n", clientConn.RemoteAddr(), targetAddr)
 
-	_, err = torConn.Write([]byte{0x05, 0x01, 0x00, 0x03, byte(len(host))})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud de conexión SOCKS5 (parte 1): %v\n", err)
-		return
-	}
-	_, err = torConn.Write([]byte(host))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud de conexión SOCKS5 (host): %v\n", err)
-		return
-	}
-	_, err = torConn.Write([]byte{byte(port >> 8), byte(port & 0xff)})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud de conexión SOCKS5 (puerto): %v\n", err)
-		return
-	}
-
-	// Paso 3: Leer la respuesta de la solicitud de conexión SOCKS5
-	connectResponse := make([]byte, 10)
-	_, err = torConn.Read(connectResponse)
-	if err != nil || connectResponse[0] != 0x05 || connectResponse[1] != 0x00 {
-		fmt.Fprintf(os.Stderr, "Error en la respuesta de la solicitud de conexión SOCKS5: %v\n", err)
-		return
-	}
-
-	// Paso 4: Enviar respuesta de conexión establecida al cliente
+	// --- Conexión SOCKS5 exitosa, informar al cliente ---
 	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar la respuesta '200 Connection established': %v\n", err)
-		return
+		fmt.Fprintf(os.Stderr, "[%s] Error al enviar '200 Connection established': %v\n", clientConn.RemoteAddr(), err)
+		return // No podemos continuar si no podemos responder al cliente
 	}
-	fmt.Printf("Enviada respuesta '200 Connection established' al cliente %s para %s\n", clientConn.RemoteAddr(), target)
 
-	// Paso 5: Reenviar el tráfico bidireccionalmente hasta que una conexión cierre
-	copyData(clientConn, torConn)
+	fmt.Printf("[%s] Respuesta '200 OK' enviada. Iniciando túnel bidireccional.\n", clientConn.RemoteAddr())
+
+	// --- Iniciar el túnel bidireccional ---
+	// Copiar datos del cliente -> Tor en una goroutine
+	// Copiar datos de Tor -> cliente en la goroutine actual (bloqueante)
+	var wg sync.WaitGroup
+	wg.Add(2) // Esperaremos a que ambas copias terminen
+
+	go transferData(torConn, clientConn, &wg, "CLIENT->TOR")
+	go transferData(clientConn, torConn, &wg, "TOR->CLIENT")
+
+	// Esperar a que ambas direcciones del túnel terminen de copiar
+	wg.Wait()
+
+	fmt.Printf("[%s] Túnel cerrado para '%s'.\n", clientConn.RemoteAddr(), targetAddr)
 }
 
-// Función para reenviar la conexión/solicitud a Caddy
-func forwardToCaddy(clientConn net.Conn, request string) {
-	caddyConn, err := net.Dial("tcp", caddyAddr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al conectar a Caddy (%s): %v\n", caddyAddr, err)
-		return
+// parseRequestLine divide la línea de solicitud HTTP en método, URI y protocolo.
+func parseRequestLine(line string) (method, requestURI, proto string, ok bool) {
+	parts := strings.SplitN(line, " ", 3)
+	if len(parts) != 3 {
+		return "", "", "", false
 	}
-	defer caddyConn.Close()
-
-	_, err = caddyConn.Write([]byte(request))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error al enviar la solicitud a Caddy: %v\n", err)
-		return
+	// Validar un poco el formato (simplificado)
+	if parts[0] == "" || parts[1] == "" || parts[2] == "" || !strings.HasPrefix(parts[2], "HTTP/") {
+		return "", "", "", false
 	}
-
-	copyData(clientConn, caddyConn)
+	return parts[0], parts[1], parts[2], true
 }
 
-func copyData(dst net.Conn, src net.Conn) (int64, error) {
-	return io.Copy(dst, src)
+// sendErrorResponse envía una respuesta de error HTTP simple al cliente.
+func sendErrorResponse(conn net.Conn, statusCode int, statusText string) {
+	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", statusCode, statusText)
+	_, err := conn.Write([]byte(response))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] Error al enviar respuesta de error (%d %s): %v\n", conn.RemoteAddr(), statusCode, statusText, err)
+	}
+}
+
+// transferData copia datos de src a dst y decrementa el WaitGroup al terminar.
+// También cierra ambas conexiones si hay un error o EOF para asegurar que el túnel se rompa.
+func transferData(dst io.WriteCloser, src io.ReadCloser, wg *sync.WaitGroup, direction string) {
+	defer wg.Done() // Indicar que esta goroutine ha terminado
+	// defer dst.Close() // No cerrar aquí directamente, io.Copy puede cerrar
+	// defer src.Close() // Dejar que los defers en handleConnection lo hagan
+
+	fmt.Printf("[%s] Iniciando copia %s\n", src.(net.Conn).RemoteAddr(), direction)
+	// io.Copy maneja EOF automáticamente. Devuelve error si algo falla.
+	bytesCopied, err := io.Copy(dst, src)
+	if err != nil {
+		// Ignorar errores comunes de conexión cerrada por el otro lado
+		if !strings.Contains(err.Error(), "use of closed network connection") && err != io.EOF {
+			fmt.Fprintf(os.Stderr, "[%s] Error durante copia %s (%d bytes): %v\n", src.(net.Conn).RemoteAddr(), direction, bytesCopied, err)
+		}
+	} else {
+		fmt.Printf("[%s] Copia %s finalizada (%d bytes)\n", src.(net.Conn).RemoteAddr(), direction, bytesCopied)
+	}
+
+	// Intenta cerrar la conexión de escritura para señalar al otro lado que hemos terminado.
+	// Esto ayuda a que el otro io.Copy termine si estaba esperando datos.
+	// Podría ser dst.CloseWrite() en TCPConn, pero Close() es más general.
+	if tcpConn, ok := dst.(*net.TCPConn); ok {
+		tcpConn.CloseWrite()
+	} else if tlsConn, ok := dst.(*tls.Conn); ok {
+		tlsConn.CloseWrite()
+	} else {
+		// Para otros tipos, un Close completo podría ser la única opción,
+		// aunque podría cortar la lectura prematuramente.
+		// dst.Close()
+	}
+	// También cerramos la lectura para liberar recursos inmediatamente
+	if tcpConn, ok := src.(*net.TCPConn); ok {
+		tcpConn.CloseRead()
+	}
+	// No cerramos explícitamente aquí porque el defer en handleConnection lo hará,
+	// y queremos asegurarnos de que ambas mitades del túnel se cierren juntas.
 }
