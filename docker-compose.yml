@@ -4,7 +4,7 @@ services:
     #build: .
     image: ghcr.io/tomasmetal23/gotls-tor-bridge:latest
     ports:
-      - "443"
+      - "8443"
     labels:
       - traefik.enable=true
       - traefik.tcp.routers.gtb.entrypoints=websecure
@@ -12,12 +12,12 @@ services:
       - traefik.tcp.routers.gtb.tls=true
       - traefik.tcp.routers.gtb.tls.passthrough=true
       - traefik.tcp.routers.gtb.tls.certresolver=lets-encr
-      - traefik.tcp.services.gtb.loadbalancer.server.port=443
+      - traefik.tcp.services.gtb.loadbalancer.server.port=8443
     volumes:
       - /home/saiyans/stacks/traefik_podman/output/*.saiyans.com.ve/cert.pem:/app/server.crt:ro
       - /home/saiyans/stacks/traefik_podman/output/*.saiyans.com.ve/key.pem:/app/server.key:ro
     environment:
-      - LISTEN_PORT=443
+      - LISTEN_PORT=8443
       - TOR_SOCKS_HOST=host.containers.internal
       - TOR_SOCKS_PORT=9050
       - CADDY_HOST=caddy
