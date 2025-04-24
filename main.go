@@ -199,9 +199,17 @@ func handleTorProxy(clientConn net.Conn, initialRequest []byte) {
 		return
 	}
 
-	// Paso 4: Reenviar datos bidireccionalmente
+	// Paso 4: Enviar respuesta de conexión establecida al cliente
+	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error al enviar la respuesta '200 Connection established' al cliente: %v\n", err)
+		return
+	}
+	fmt.Printf("Enviada respuesta '200 Connection established' al cliente %s para %s\n", clientConn.RemoteAddr(), target)
+
+	// Paso 5: Reenviar datos bidireccionalmente
 	go copyData(clientConn, torConn)
-	copyData(torConn, clientConn)
+	go copyData(torConn, clientConn)
 }
 
 func copyData(dst net.Conn, src net.Conn) (int64, error) {
