@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context" // <-- Asegúrate que está aquí
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -47,6 +47,7 @@ func getEnv(key string, defaultValue string) string {
 type DualPurposeHandler struct {
 	TorSocksAddr string
 	CaddyProxy   *httputil.ReverseProxy
+	// CaddyBackendURLString string // Alternativa más limpia para logging
 }
 
 func NewDualPurposeHandler(torAddr string, caddyBackendURL *url.URL) *DualPurposeHandler {
@@ -69,30 +70,25 @@ func NewDualPurposeHandler(torAddr string, caddyBackendURL *url.URL) *DualPurpos
 
 	caddyProxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 		fmt.Fprintf(os.Stderr, "[%s] Reverse Proxy Error hacia Caddy (%s): %v\n", req.RemoteAddr, caddyBackendURL.Host, err)
-		// Evitar escribir cabecera si ya se escribió algo (raro pero posible)
-		// if _, ok := rw.(http.Flusher); ok { // Check if response started? A bit tricky.
-		// Use http.Header().Get("Content-Type") == "" as proxy?
-		// }
-		// De forma segura, solo logueamos si ya se envió algo
 		select {
-		case <-req.Context().Done(): // Si el cliente cerró la conexión
+		case <-req.Context().Done():
 			fmt.Fprintf(os.Stderr, "[%s] Client disconnected during reverse proxy error handling.\n", req.RemoteAddr)
 			return
 		default:
-			// Intentar enviar 502 si no se ha enviado nada aún
-			// Esta comprobación no es perfecta, pero evita la mayoría de los "http: superfluous response.WriteHeader call"
-			if len(rw.Header()) == 0 { // Crude check if headers might have been written
+			// Evitar pánico "WriteHeader after headers written"
+			headerMap := rw.Header()
+			if _, written := headerMap["Content-Type"]; !written && headerMap.Get("Content-Length") == "" { // Intenta detectar si ya se escribió
 				rw.WriteHeader(http.StatusBadGateway)
 			} else {
-				fmt.Fprintf(os.Stderr, "[%s] Headers already written, cannot send 502 for reverse proxy error.\n", req.RemoteAddr)
+				fmt.Fprintf(os.Stderr, "[%s] Headers potentially already written, cannot send 502 for reverse proxy error.\n", req.RemoteAddr)
 			}
 		}
-
 	}
 
 	return &DualPurposeHandler{
 		TorSocksAddr: torAddr,
 		CaddyProxy:   caddyProxy,
+		// CaddyBackendURLString: caddyBackendURL.String(), // Si se usa la alternativa
 	}
 }
 
@@ -103,7 +99,8 @@ func (h *DualPurposeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		h.handleTunnel(w, r, logPrefix)
 	} else {
-		fmt.Printf("%s Reenviando solicitud a Caddy (%s)\n", logPrefix, h.CaddyProxy.Director) // Mostrar Director en lugar de ErrorHandler
+		// fmt.Printf("%s Reenviando solicitud a Caddy (%s)\n", logPrefix, h.CaddyBackendURLString) // Si se usa la alternativa
+		fmt.Printf("%s Reenviando solicitud a Caddy (%s)\n", logPrefix, caddyAddr) // Usando variable global
 		h.CaddyProxy.ServeHTTP(w, r)
 	}
 }
@@ -130,7 +127,6 @@ func (h *DualPurposeHandler) handleTunnel(w http.ResponseWriter, r *http.Request
 	dialContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Asegurarse de que el dialer soporta ContextDialer
 	contextDialer, ok := dialer.(proxy.ContextDialer)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "%s Error: El dialer SOCKS5 no soporta DialContext\n", logPrefix)
@@ -141,26 +137,33 @@ func (h *DualPurposeHandler) handleTunnel(w http.ResponseWriter, r *http.Request
 	torConn, err := contextDialer.DialContext(dialContext, "tcp", targetAddr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s Error al conectar a '%s' via SOCKS5 (%s): %v\n", logPrefix, targetAddr, h.TorSocksAddr, err)
-		// Añadir más detalles al error del cliente
 		errMsg := fmt.Sprintf("Bad Gateway: SOCKS connection to '%s' failed", targetAddr)
-		// Chequear si fue un timeout
+		statusCode := http.StatusBadGateway // 502 por defecto
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			errMsg = fmt.Sprintf("Gateway Timeout: SOCKS connection to '%s' timed out", targetAddr)
-			http.Error(w, errMsg, http.StatusGatewayTimeout) // 504
-		} else {
-			http.Error(w, errMsg, http.StatusBadGateway) // 502
+			statusCode = http.StatusGatewayTimeout // 504 si fue timeout
 		}
+		http.Error(w, errMsg, statusCode)
 		return
 	}
 	defer torConn.Close()
 	fmt.Printf("%s Conexión SOCKS5 establecida a '%s'\n", logPrefix, targetAddr)
 
+	// --- Ahora intentamos el Hijack ---
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "%s Error: El ResponseWriter no soporta Hijacking\n", logPrefix)
-		http.Error(w, "Internal Server Error (Hijacking not supported)", http.StatusInternalServerError)
+		// ESTE ES EL ERROR QUE ESTABAS VIENDO
+		fmt.Fprintf(os.Stderr, "%s Error CRÍTICO: El ResponseWriter NO soporta Hijacking. Probablemente debido a HTTP/2.\n", logPrefix)
+		// Ya no podemos enviar un http.Error porque podríamos haber perdido control.
+		// Cerramos la conexión a Tor que ya habíamos establecido.
+		torConn.Close()
+		// Intentamos cerrar la conexión del cliente abruptamente si es posible (puede fallar)
+		if conn, _, HijackErr := w.(http.Hijacker).Hijack(); HijackErr == nil {
+			conn.Close()
+		}
 		return
 	}
+
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s Error al hacer Hijack de la conexión: %v\n", logPrefix, err)
@@ -168,6 +171,7 @@ func (h *DualPurposeHandler) handleTunnel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer clientConn.Close()
+	fmt.Printf("%s Hijack exitoso. Enviando 200 OK al cliente.\n", logPrefix) // Log añadido
 
 	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 	if err != nil {
@@ -217,6 +221,7 @@ func main() {
 			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 		},
+		NextProtos: []string{"http/1.1"}, // <-- *** LA CORRECCIÓN PRINCIPAL ESTÁ AQUÍ ***
 	}
 
 	handler := NewDualPurposeHandler(torSOCKSAddr, caddyBackendURL)
@@ -232,7 +237,7 @@ func main() {
 		ErrorLog:          log.New(os.Stderr, "HTTPS Server: ", log.LstdFlags),
 	}
 
-	fmt.Printf("Servidor HTTPS dual iniciado en [::]:%s\n", listenPort)
+	fmt.Printf("Servidor HTTPS dual iniciado en [::]:%s (Forzando HTTP/1.1)\n", listenPort) // Log modificado
 	fmt.Printf("- Solicitudes CONNECT reenviadas a SOCKS5: %s\n", torSOCKSAddr)
 	fmt.Printf("- Otras solicitudes reenviadas a Caddy: %s\n", caddyAddr)
 
@@ -256,32 +261,18 @@ func transferData(dst io.WriteCloser, src io.ReadCloser, wg *sync.WaitGroup, dir
 	if err != nil {
 		netErr, isNetErr := err.(net.Error)
 		opErr, isOpErr := err.(*net.OpError)
-
 		shouldLogAsError := true
-		if err == io.EOF {
-			shouldLogAsError = false
-		} else if isNetErr && netErr.Timeout() {
-			shouldLogAsError = false
-		} else if isOpErr && (strings.Contains(opErr.Err.Error(), "use of closed network connection") ||
-			strings.Contains(opErr.Err.Error(), "connection reset by peer") ||
-			strings.Contains(opErr.Err.Error(), "broken pipe")) {
-			shouldLogAsError = false
-		} else if strings.Contains(err.Error(), "tls: use of closed connection") {
+		if err == io.EOF || (isNetErr && netErr.Timeout()) ||
+			(isOpErr && (strings.Contains(opErr.Err.Error(), "use of closed network connection") ||
+				strings.Contains(opErr.Err.Error(), "connection reset by peer") ||
+				strings.Contains(opErr.Err.Error(), "broken pipe"))) ||
+			strings.Contains(err.Error(), "tls: use of closed connection") {
 			shouldLogAsError = false
 		}
-
 		if shouldLogAsError {
-			// Imprimir tipo y valor del error para mejor depuración
 			fmt.Fprintf(os.Stderr, "%s: Error durante copia (%d bytes): %T %v\n", logPrefix, bytesCopied, err, err)
 		}
-		// else {
-		// 	fmt.Printf("%s: Copia terminada (%d bytes), cierre esperado: %v\n", logPrefix, bytesCopied, err)
-		// }
 	}
-
-	// if bytesCopied > 0 {
-	// 	fmt.Printf("%s: Copia finalizada (%d bytes)\n", logPrefix, bytesCopied)
-	// }
 
 	type closeWriter interface{ CloseWrite() error }
 	if cw, ok := dst.(closeWriter); ok {
