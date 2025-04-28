@@ -51,13 +51,6 @@
     ENV TLS_CERT_FILE=/app/server.crt 
     ENV TLS_KEY_FILE=/app/server.key   
     
-    # Usuario no privilegiado (Buena Práctica)
-    # Crear un usuario y grupo específicos
-    RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-    # Cambiar propietario de los archivos necesarios
-
-    # Cambiar al usuario no privilegiado
-    USER appuser
-    
+   
     # Comando para ejecutar la aplicación cuando el contenedor inicie
     CMD ["./gotls-tor-bridge"]
