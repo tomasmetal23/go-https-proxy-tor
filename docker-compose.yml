@@ -20,7 +20,7 @@ services:
       - LISTEN_PORT=8443
       - TOR_SOCKS_HOST=host.containers.internal
       - TOR_SOCKS_PORT=9050
-      - CADDY_HOST=caddy
+      - CADDY_BACKEND_ADDR=http://caddy:80
       - CADDY_PORT=80
       - TLS_CERT_FILE=/app/server.crt
       - TLS_KEY_FILE=/app/server.key
