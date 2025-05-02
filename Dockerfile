@@ -20,7 +20,7 @@
     # Compilar la aplicación estáticamente (sin CGO)
     # -ldflags="-w -s": Reduce el tamaño del binario eliminando información de debug y tabla de símbolos.
     # El "." al final indica que compile el paquete en el directorio actual.
-    RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/gotls-tor-bridge .
+    RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/go-https-proxy-tor .
     
     # --- Etapa Final (Imagen Mínima) ---
     FROM alpine:3.19
@@ -36,7 +36,7 @@
     WORKDIR /app
     
     # Copiar el binario compilado desde la etapa 'builder'
-    COPY --from=builder /app/gotls-tor-bridge .
+    COPY --from=builder /app/go-https-proxy-tor .
     
   
     # Exponer el puerto por defecto que usa la aplicación
@@ -53,4 +53,4 @@
     ENV PROXY_USER=
     ENV PROXY_PASSWORD=
     # Comando para ejecutar la aplicación cuando el contenedor inicie
-    CMD ["./gotls-tor-bridge"]
+    CMD ["./go-https-proxy-tor"]
