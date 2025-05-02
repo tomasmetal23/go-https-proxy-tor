@@ -50,7 +50,7 @@
     ENV TOR_SOCKS_PORT=9050
     ENV TLS_CERT_FILE=/app/server.crt 
     ENV TLS_KEY_FILE=/app/server.key   
-    
-   
+    ENV PROXY_USER=tor
+    ENV PROXY_PASSWORD=admin
     # Comando para ejecutar la aplicación cuando el contenedor inicie
     CMD ["./gotls-tor-bridge"]
