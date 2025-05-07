@@ -21,6 +21,16 @@ A Go application that listens for HTTPS connections and acts either as a standar
 *   Simplifying access to Tor for clients that support standard HTTPS proxies with Basic Authentication.
 *   Potentially bypassing network restrictions that block direct Tor access but allow HTTPS traffic.
 
+**Example for Bypass GPT region ban:**
+![image](https://github.com/user-attachments/assets/82f30dc8-bbf4-4865-8062-d98b55de63fa)
+
+![image](https://github.com/user-attachments/assets/4df7512a-9034-42a2-9fc5-72d5e835f022)
+
+![image](https://github.com/user-attachments/assets/7f985212-dc27-488b-ac30-16e62125a920)
+
+![image](https://github.com/user-attachments/assets/73f5738c-8364-4a18-bb7f-3389931b4241)
+This configuration ensures that FoxyProxy only uses the Tor proxy for domains specified in the 'Proxy by Patterns' list.
+
 ## Requirements:
 
 *   Go (tested with 1.18+, likely works with newer versions) for building/running directly.
