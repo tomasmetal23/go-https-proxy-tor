@@ -21,7 +21,7 @@ A Go application that listens for HTTPS connections and acts either as a standar
 *   Simplifying access to Tor for clients that support standard HTTPS proxies with Basic Authentication.
 *   Potentially bypassing network restrictions that block direct Tor access but allow HTTPS traffic.
 
-**Example for Bypass GPT region ban:**
+**Example to bypass region ban in chatGPT website:**
 ![image](https://github.com/user-attachments/assets/82f30dc8-bbf4-4865-8062-d98b55de63fa)
 
 ![image](https://github.com/user-attachments/assets/4df7512a-9034-42a2-9fc5-72d5e835f022)
